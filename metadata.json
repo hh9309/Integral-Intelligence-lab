@@ -1,0 +1,6 @@
+{
+  "name": "积分宇宙",
+  "description": "一个关于面积、变化率、物理与概率的动态积分可视化平台，通过生动动画探寻离散求和过渡到连续累积的数学之美。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
