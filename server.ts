@@ -1,217 +1,145 @@
 import express from "express";
 import path from "path";
-import { GoogleGenAI, Type } from "@google/genai";
+import { createServer as createViteServer } from "vite";
+import { GoogleGenAI } from "@google/genai";
+import dotenv from "dotenv";
 
-const app = express();
-const PORT = 3000;
+dotenv.config();
 
-// Parse JSON request bodies
-app.use(express.json());
-
-// Lazy-initialized Gemini Client helper
 let aiClient: GoogleGenAI | null = null;
 
-function getGeminiClient() {
-  if (aiClient) return aiClient;
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY") {
-    throw new Error("MISSING_API_KEY");
-  }
-  aiClient = new GoogleGenAI({
-    apiKey: apiKey,
-    httpOptions: {
-      headers: {
-        "User-Agent": "aistudio-build",
+function getAIClient(): GoogleGenAI {
+  if (!aiClient) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      console.warn("GEMINI_API_KEY is not set. Gemini features will return a mock or informative message.");
+    }
+    aiClient = new GoogleGenAI({
+      apiKey: apiKey || "dummy-key-for-init",
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
       },
-    },
-  });
+    });
+  }
   return aiClient;
 }
 
-// AI Insight Endpoint
-app.post("/api/insight", async (req, res) => {
-  try {
-    const { mode, parameters, customPrompt, isStepByStep } = req.body;
+async function startServer() {
+  const app = express();
+  const PORT = 3000;
 
-    let gemini;
+  app.use(express.json({ limit: "5mb" }));
+
+  // API Routes
+  app.get("/api/health", (req, res) => {
+    res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  // AI Chat and Calculus Diagnostic Assistant
+  app.post("/api/chat", async (req, res) => {
     try {
-      gemini = getGeminiClient();
-    } catch (e: any) {
-      if (e.message === "MISSING_API_KEY") {
-        return res.status(200).json({
-          success: false,
-          errorType: "MISSING_KEY",
-          message: `### 💡 需要配置 API Key
-为了解锁强大的 **AI 数学洞察服务**，请在 AI Studio 编辑器的右侧控制面板 **Settings > Secrets** 中添加一个名为 \`GEMINI_API_KEY\` 的密钥，并填入您的 Gemini API 密钥。
+      const { message, context, model, apiKey } = req.body;
 
-*(当前应用仍在本地运行，您可以正常体验五个关卡的微积分图形交互，不受影响。)*`,
+      const effectiveApiKey = apiKey || process.env.GEMINI_API_KEY;
+
+      if (!effectiveApiKey && model !== "deepseek-v4-pro") {
+        return res.status(200).json({
+          reply: `【系统提示】检测到尚未配置 API_KEY。\n\n针对您的微积分问题：\n**问题**：“${message}”\n\n**理论速查**：\n1. **黎曼可积性**：若函数 $f(x)$ 在有界闭区间 $[a,b]$ 上连续，或仅有有限个第一类间断点且有界，则 $f(x)$ 必黎曼可积。\n2. **微积分第一基本定理 (FTC 1)**：若 $f(t)$ 连续，则变上限积分 $\\Phi(x) = \\int_a^x f(t)dt$ 在 $[a,b]$ 上可导且 $\\Phi'(x) = f(x)$。\n3. **牛顿-莱布尼茨公式 (FTC 2)**：$\\int_a^b f(x)dx = F(b) - F(a)$，其中 $F'(x) = f(x)$。\n\n请在右上角 ⚙️ 大模型设置中配置您的 API-Key 即可发起大模型深度推导。`,
         });
       }
-      throw e;
-    }
 
-    // Construct a beautiful mathematical context prompting Gemini
-    let promptContext = "";
-    if (mode === "riemann") {
-      promptContext = `在微积分学习中，“黎曼和逼近”是理解定积分核心。
-用户当前正在研究的配置如下：
-- 函数：f(x) = ${parameters.funcLabel}在区间 [${parameters.a}, ${parameters.b}]。
-- 当前分割区间数 N：${parameters.n}。
-- 逼近方式：${parameters.sumTypeLabel} (如左微元、右微元、中点微元等)。
-- 算出的分割段宽 dx：${parameters.dx}。
-- 黎曼和近似值：${parameters.riemannSum}。
-- 极限定积分精确值：${parameters.exact}。
-- 当前的绝对误差：${parameters.error}。`;
-    } else if (mode === "area") {
-      promptContext = `在微积分学习中，“面积与原函数累积（微积分基本定理）”是核心。
-用户当前操作：
-- 被积函数：f(t) = ${parameters.funcLabel}。
-- 区间：从 a = ${parameters.a} 开始累积。
-- 当前滑块扫过的累积终点：x = ${parameters.xCurrent}。
-- 累积形成的积分面积：A(x) = ∫[a, x] f(t) dt = ${parameters.accumulatedArea}。`;
-    } else if (mode === "distance") {
-      promptContext = `在物理与微积分中，“路程累积（速度的积分）”是极佳案例。
-用户当前观察一个模拟移动的物体：
-- 速度曲线：v(t) = ${parameters.velocityProfileLabel}。
-- 模拟时间范围：从 t = 0 到 t = ${parameters.tMax} 秒。
-- 当前时刻：t_current = ${parameters.tCurrent} 秒。
-- 此时物体的瞬时运动速度 v(t_current) = ${parameters.vCurrent} m/s。
-- 通过积分累积得到的总位移 s(t_current) = ∫[0, t_current] v(u) du = ${parameters.distance} 米。`;
-    } else if (mode === "probability") {
-      promptContext = `在概率论中，连续随机变量的“底面积分（概率密度积分）”代表事件发生的概率。
-用户配置的高斯正态分布 PDF 的参数为：
-- 均值 (μ)：${parameters.mean}
-- 标准差 (σ)：${parameters.stdDev}
-- 被积分的事件区间：[${parameters.x1}, ${parameters.x2}]
-- 积分概率 P(${parameters.x1} <= X <= ${parameters.x2}) = ∫[x1, x2] f(x) dx = ${(parameters.prob * 100).toFixed(4)}%`;
-    } else if (mode === "energy") {
-      promptContext = `在物理学与工程中，“能量累积（变力做功 F·dx 或 功率累积 P·dt）”是直观的积分体现。
-用户当前通过拖拽滑块来压缩弹簧，变力做功存储弹性势能（胡克定律）：
-- 劲度系数 k：${parameters.k} N/m
-- 弹簧被压缩的拉伸位移 x：${parameters.x} 米 (当前状态)
-- 此时施加的实时胡克变力：F(x) = k·x = ${parameters.force} 牛顿
-- 积分变力做功（弹性势能）：E_p = ∫[0, x] k·u du = 1/2 k x^2 = ${parameters.energy} 焦耳`;
-    }
+      const systemInstruction = `你是一位世界顶级的微积分与数学分析特聘教授、AI微积分实验室智能导师。
+你的核心专长：
+1. 定积分定义、黎曼和（左/右/中点/梯形/辛普森法）、达布上和与下和极限推导；
+2. 微积分第一基本定理（变上限积分可导性 $\\frac{d}{dx}\\int_a^x f(t)dt = f(x)$）与第二基本定理（牛顿-莱布尼茨公式）；
+3. 积分求解技巧精讲（第一类/第二类换元积分法、分部积分法、有理分式展开法）；
+4. 瑕积分（反常积分）的敛散性诊断（比较审敛法、柯西主值、瑕点判定）；
+5. 物理与工程几何应用（曲线弧长、旋转体体积-磁盘/圆柱壳法、变力做功、连续分布概率密度）。
 
-    const systemInstruction = `你是一位才华横溢、充满温情的微积分专家、数学科普家。
-你的任务是引导用户理解微积分的直观美学、本质思想：面积累积、从离散向连续的发展，而不是枯燥的公式记忆。
-在解答中，要：
-1. 深入浅出地解释用户当前交互页面上发生的数学变化。例如：如果分割数 N 较大，赞美他们逼近了极限；如果 N 较小，揭示离散误差的直观几何呈现。
-2. 语言淡雅大方、亲切鼓励、带有启发性，排版使用优雅的 Markdown。
-3. 【极重要：必须全量使用漂亮规范的 KaTeX / LaTeX 格式来书写所有数学公式、符号与表达式】：
-   - 禁止使用普通英文文本（如 f(x)、dx、sigma）、Markdown 加粗普通文本（如 **F = k*x**）或普通的 code 块包裹（如 \`dx\`）来书写数学对象。
-   - 所有独立成行的大公式、求和公式、导数与定积分公式，必须全部包裹在双美元符号中，例如：$$\\int_{a}^{b} f(t) \\, dt = F(b) - F(a)$$ 或 $$\\lim_{N \\to \\infty} \\sum_{i=1}^{N} f(x_i) \\Delta x$$ 或 $$E_p = \\frac{1}{2}kx^2$$。
-   - 所有行内出现的任何变量名、自变量、极小元、均值、标准差、函数符号、常数，例如 $x$、$t$、$f(x)$、$dx$、$\\sigma$、$\\mu$、$k$、$v(t)$ 等，必须全部包裹在单美元符号中，例如：$x$、$t_i$、$f(x)$、$\\sigma$、$\\mu$、$k$、$F=kx$。
-4. 结合用户所选的具体模型和参数进行分析，算术数字要自然贴切，指出微积分基本定理的惊人之处。
-5. 如果是用户提问，请专业通俗地予以解答并延伸。`;
+回复风格要求：
+- 严格严谨、逻辑清晰、公式规范（使用标准的 LaTeX 数学公式 $...$ 行内或 $$...$$ 独立行）；
+- 善于采用“几何直观 + 代数推导 + 物理隐喻”三位一体的方式解答；
+- 提供清晰的分步推导与总结；
+- 语言使用中文简体，语气亲切大方、学术严谨。`;
 
-    let userMessage = "";
-    let config: any = {
-      systemInstruction,
-      temperature: 0.7,
-    };
-
-    if (isStepByStep) {
-      const stepSystemInstruction = systemInstruction + `\n你必须将当前的数学物理模型分解为 3 至 4 个清晰、简练、循序渐进的推导与几何分析步骤，让读者可以像阅读连环画一样精细跟随。每个步骤应含：\n- title: 步骤对应的小标题 (例如：'步骤一：感知区间划分')\n- content: 用通俗生动、严谨优雅的 Markdown 语言深入剖析这一步对应的公式演变、数值大小与直观美感，并严格遵守上述 KaTeX 格式要求书写每一步所有的数学公式与字母变量。`;
-      
-      config = {
-        systemInstruction: stepSystemInstruction,
-        temperature: 0.7,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            steps: {
-              type: Type.ARRAY,
-              description: "3至4个循序渐进的剖析步骤",
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  title: { type: Type.STRING, description: "步骤的小标题" },
-                  content: { type: Type.STRING, description: "步骤的 Markdown 详细解析内容，结合当前数值进行针对性分析" }
-                },
-                required: ["title", "content"]
-              }
-            },
-            summary: { type: Type.STRING, description: "一句话短小精炼的数学物理总结" }
-          },
-          required: ["steps", "summary"]
-        }
-      };
-
-      userMessage = `请针对以下模型与参数，生成一个包含3-4步的数学物理推导分步教学演示：\n\n当前状态上下文：\n${promptContext}`;
-    } else {
-      userMessage = customPrompt 
-        ? `结合当前的数学模型上下文：\n${promptContext}\n\n我的提问是：\n${customPrompt}`
-        : `请对当前模型下的状态进行一次精彩生动、淡雅大方的深度数学洞察与科普分析。\n\n当前状态上下文：\n${promptContext}`;
-    }
-
-    const response = await gemini.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: userMessage,
-      config,
-    });
-
-    if (isStepByStep) {
-      let steps = [];
-      let summary = "";
-      try {
-        const parsed = JSON.parse(response.text || "{}");
-        steps = parsed.steps || [];
-        summary = parsed.summary || "";
-      } catch (parseErr) {
-        console.error("Failed to parse steps JSON:", parseErr, response.text);
-        steps = [
-          {
-            title: "推导分析",
-            content: "当前由于解析格式问题，已为您渲染普通版洞察响应。\n\n" + (response.text || "")
-          }
-        ];
-        summary = "计算完成";
+      let promptWithContext = message;
+      if (context) {
+        promptWithContext = `【当前实验室仿真状态】\n- 目标函数: ${context.funcStr || "未指定"}\n- 积分区间: [${context.a ?? 0}, ${context.b ?? 1}]\n- 分割数 n: ${context.n ?? 10}\n- 当前逼近方法: ${context.method || "未指定"}\n- 计算结果: 黎曼和 ≈ ${context.riemannSum ?? "N/A"}, 解析精确值 = ${context.exactValue ?? "N/A"}\n\n【用户提问或诊断请求】\n${message}`;
       }
-      res.json({
-        success: true,
-        isStepByStep: true,
-        steps,
-        summary
+
+      // Handle DeepSeek if requested via server proxy
+      if (model === "deepseek-v4-pro" && effectiveApiKey) {
+        const dsRes = await fetch("https://api.deepseek.com/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${effectiveApiKey}`,
+          },
+          body: JSON.stringify({
+            model: "deepseek-chat",
+            messages: [
+              { role: "system", content: systemInstruction },
+              { role: "user", content: promptWithContext },
+            ],
+            temperature: 0.6,
+          }),
+        });
+        const dsData = (await dsRes.json()) as any;
+        return res.json({
+          reply: dsData.choices?.[0]?.message?.content || "DeepSeek 未返回有效文本",
+        });
+      }
+
+      // Default to Google Gen AI (gemini-2.5-flash)
+      const ai = new GoogleGenAI({
+        apiKey: effectiveApiKey,
+        httpOptions: {
+          headers: {
+            "User-Agent": "aistudio-build",
+          },
+        },
       });
-    } else {
+
+      const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: promptWithContext,
+        config: {
+          systemInstruction,
+          temperature: 0.7,
+        },
+      });
+
       res.json({
-        success: true,
-        isStepByStep: false,
-        text: response.text,
+        reply: response.text || "抱歉，未生成有效回复，请重试。",
+      });
+    } catch (error: any) {
+      console.error("AI Chat Error:", error);
+      res.status(500).json({
+        error: "AI 思考分析时发生异常",
+        details: error?.message || String(error),
       });
     }
-  } catch (err: any) {
-    console.error("Gemini API Error:", err);
-    res.status(500).json({
-      success: false,
-      message: "数学博士开小差了，请稍后再试或检查配置！Error: " + err.message,
-    });
-  }
-});
+  });
 
-// Setup Vite middleware in Development
-async function startServer() {
+  // Vite middleware in dev, static files in production
   if (process.env.NODE_ENV !== "production") {
-    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
-    console.log("Development modes: Vite middleware loaded.");
   } else {
     const distPath = path.join(process.cwd(), "dist");
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
     });
-    console.log("Production modes: Serving static build from dist.");
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Integral Universe Server is running on port ${PORT}`);
+    console.log(`Integral Calculus Lab server running on http://localhost:${PORT}`);
   });
 }
 
